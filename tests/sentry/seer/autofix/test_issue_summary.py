@@ -27,6 +27,7 @@ from sentry.seer.autofix.issue_summary import (
 )
 from sentry.seer.autofix.utils import AutofixStoppingPoint
 from sentry.seer.models import SummarizeIssueResponse, SummarizeIssueScores
+from sentry.tasks.seer.autofix import run_issue_automation
 from sentry.testutils.cases import APITestCase, SnubaTestCase, TestCase
 from sentry.testutils.helpers.action_log import capture_action_log
 from sentry.testutils.helpers.datetime import before_now
@@ -513,7 +514,7 @@ class IssueSummaryTest(APITestCase, SnubaTestCase, OccurrenceTestMixin):
     @patch("sentry.seer.autofix.issue_summary.get_trace_tree_for_event")
     @patch("sentry.seer.autofix.issue_summary._call_seer")
     @patch("sentry.seer.autofix.issue_summary._get_event")
-    def test_get_issue_summary_with_web_vitals_issue(
+    def test_run_issue_automation_with_web_vitals_issue(
         self,
         mock_get_event,
         mock_call_seer,
@@ -534,14 +535,14 @@ class IssueSummaryTest(APITestCase, SnubaTestCase, OccurrenceTestMixin):
             ),
         )
         mock_generate_fixability_score.return_value = mock_fixability_response
-        event = Mock(
+        summarized_event = Mock(
             event_id="test_event_id",
             data="test_event_data",
             trace_id="test_trace",
             datetime=datetime.datetime.now(),
         )
         serialized_event = {"event_id": "test_event_id", "data": "test_event_data"}
-        mock_get_event.return_value = [serialized_event, event]
+        mock_get_event.return_value = [serialized_event, summarized_event]
         mock_summary = SummarizeIssueResponse(
             group_id=str(self.group.id),
             headline="Test headline",
@@ -579,55 +580,10 @@ class IssueSummaryTest(APITestCase, SnubaTestCase, OccurrenceTestMixin):
         assert group_info is not None
         self.group = group_info.group
 
-        summary_data, status_code = get_issue_summary(
-            self.group, self.user, source=SeerAutomationSource.POST_PROCESS
-        )
+        run_issue_automation(self.group.id)
 
-        assert status_code == 200
         mock_record_seer_run.assert_called_once()
         mock_trigger_autofix_task.assert_called_once()
-
-    @patch("sentry.seer.autofix.issue_summary.run_automation")
-    @patch("sentry.seer.autofix.issue_summary.get_trace_tree_for_event")
-    @patch("sentry.seer.autofix.issue_summary._call_seer")
-    @patch("sentry.seer.autofix.issue_summary._get_event")
-    def test_get_issue_summary_continues_when_automation_fails(
-        self,
-        mock_get_event,
-        mock_call_seer,
-        mock_get_trace_tree,
-        mock_run_automation,
-    ):
-        """Test that issue summary is still returned when run_automation throws an exception."""
-        # Set up event and seer response
-        event = Mock(event_id="test_event_id", datetime=datetime.datetime.now())
-        serialized_event = {"event_id": "test_event_id", "data": "test_event_data"}
-        mock_get_event.return_value = [serialized_event, event]
-        mock_get_trace_tree.return_value = None
-
-        mock_summary = SummarizeIssueResponse(
-            group_id=str(self.group.id),
-            headline="Test headline",
-            whats_wrong="Test whats wrong",
-            trace="Test trace",
-            possible_cause="Test possible cause",
-        )
-        mock_call_seer.return_value = mock_summary
-
-        # Make run_automation raise an exception
-        mock_run_automation.side_effect = Exception("Automation failed")
-
-        # Call get_issue_summary and verify it still returns successfully
-        summary_data, status_code = get_issue_summary(self.group, self.user)
-
-        assert status_code == 200
-        expected_response = mock_summary.dict()
-        expected_response["event_id"] = event.event_id
-        assert summary_data == convert_dict_key_case(expected_response, snake_to_camel_case)
-
-        # Verify run_automation was called and failed
-        mock_run_automation.assert_called_once()
-        mock_call_seer.assert_called_once()
 
     @patch("sentry.seer.autofix.issue_summary.get_trace_tree_for_event")
     def test_get_issue_summary_handles_trace_tree_errors(
@@ -654,7 +610,6 @@ class IssueSummaryTest(APITestCase, SnubaTestCase, OccurrenceTestMixin):
                     possible_cause="cause",
                 ),
             ) as mock_call_seer,
-            patch("sentry.seer.autofix.issue_summary.run_automation"),
         ):
             summary_data, status_code = get_issue_summary(self.group, self.user)
 
@@ -667,14 +622,13 @@ class IssueSummaryTest(APITestCase, SnubaTestCase, OccurrenceTestMixin):
     @patch("sentry.seer.autofix.issue_summary.get_trace_tree_for_event")
     @patch("sentry.seer.autofix.issue_summary._call_seer")
     @patch("sentry.seer.autofix.issue_summary._get_event")
-    def test_get_issue_summary_with_should_run_automation_false(
+    def test_get_issue_summary_caches_without_running_automation(
         self,
         mock_get_event,
         mock_call_seer,
         mock_get_trace_tree,
         mock_run_automation,
     ):
-        """Test that should_run_automation=False prevents run_automation from being called."""
         event = Mock(
             event_id="test_event_id",
             data="test_event_data",
@@ -700,9 +654,7 @@ class IssueSummaryTest(APITestCase, SnubaTestCase, OccurrenceTestMixin):
         expected_response_summary = mock_summary.dict()
         expected_response_summary["event_id"] = event.event_id
 
-        summary_data, status_code = get_issue_summary(
-            self.group, self.user, should_run_automation=False
-        )
+        summary_data, status_code = get_issue_summary(self.group, self.user)
 
         assert status_code == 200
         assert summary_data == convert_dict_key_case(expected_response_summary, snake_to_camel_case)

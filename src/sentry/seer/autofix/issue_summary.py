@@ -62,6 +62,7 @@ from sentry.utils.tracing import start_span
 
 logger = logging.getLogger(__name__)
 
+
 auto_run_source_map = {
     SeerAutomationSource.POST_PROCESS: "issue_summary_on_post_process_fixability",
     SeerAutomationSource.NIGHT_SHIFT: "night_shift",
@@ -484,9 +485,7 @@ def _generate_summary(
     group: Group,
     user: User | RpcUser | AnonymousUser,
     force_event_id: str | None,
-    source: SeerAutomationSource,
     cache_key: str,
-    should_run_automation: bool = True,
 ) -> tuple[dict[str, Any], int]:
     """Core logic to generate and cache the issue summary."""
     serialized_event, event = _get_event(group, user, provided_event_id=force_event_id)
@@ -535,14 +534,6 @@ def _generate_summary(
     summary_dict["event_id"] = event.event_id
     cache.set(cache_key, summary_dict, timeout=int(timedelta(days=7).total_seconds()))
 
-    if should_run_automation:
-        try:
-            run_automation(group, user, event, source)
-        except Exception:
-            logger.exception(
-                "Error auto-triggering autofix from issue summary", extra={"group_id": group.id}
-            )
-
     return summary_dict, 200
 
 
@@ -568,20 +559,9 @@ def get_issue_summary(
     user: User | RpcUser | AnonymousUser | None = None,
     force_event_id: str | None = None,
     source: SeerAutomationSource = SeerAutomationSource.ISSUE_DETAILS,
-    should_run_automation: bool = True,
 ) -> tuple[dict[str, Any], int]:
     """
-    Generate an AI summary for an issue.
-
-    Args:
-        group: The issue group
-        user: The user requesting the summary
-        force_event_id: Optional event ID to force summarizing a specific event
-        source: The source triggering the summary generation
-        should_run_automation: Whether to trigger automation after generating summary
-
-    Returns:
-        A tuple containing (summary_data, status_code)
+    Get a cached AI issue summary or generate one.
     """
     if user is None:
         user = AnonymousUser()
@@ -598,9 +578,7 @@ def get_issue_summary(
 
     # if force_event_id is set, we always generate a new summary
     if force_event_id:
-        summary_dict, status_code = _generate_summary(
-            group, user, force_event_id, source, cache_key, should_run_automation
-        )
+        summary_dict, status_code = _generate_summary(group, user, force_event_id, cache_key)
         _log_seer_scanner_billing_event(group, source)
         return convert_dict_key_case(summary_dict, snake_to_camel_case), status_code
 
@@ -620,9 +598,7 @@ def get_issue_summary(
                 return convert_dict_key_case(cached_summary, snake_to_camel_case), 200
 
             # Lock acquired and cache is still empty, proceed with generation
-            summary_dict, status_code = _generate_summary(
-                group, user, force_event_id, source, cache_key, should_run_automation
-            )
+            summary_dict, status_code = _generate_summary(group, user, force_event_id, cache_key)
             _log_seer_scanner_billing_event(group, source)
             return convert_dict_key_case(summary_dict, snake_to_camel_case), status_code
 

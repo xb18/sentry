@@ -1,6 +1,7 @@
 import logging
 
 import sentry_sdk
+from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from taskbroker_client.retry import Retry
 from taskbroker_client.state import current_task
@@ -17,6 +18,11 @@ from sentry.seer.autofix.constants import (
     AutofixAutomationTuningSettings,
     SeerAutomationSource,
 )
+from sentry.seer.autofix.issue_summary import (
+    get_and_update_group_fixability_score,
+    get_issue_summary,
+    run_automation,
+)
 from sentry.seer.autofix.utils import (
     SEAT_BASED_STOPPING_POINTS,
     AutofixStoppingPoint,
@@ -32,6 +38,7 @@ from sentry.tasks.base import instrumented_task
 from sentry.taskworker.namespaces import ingest_errors_tasks, issues_tasks
 from sentry.utils import metrics
 from sentry.utils.cache import cache
+from sentry.utils.locking import UnableToAcquireLock
 
 logger = logging.getLogger(__name__)
 
@@ -55,39 +62,17 @@ def _get_group_or_log(group_id: int, task_name: str) -> Group | None:
         return None
 
 
-@instrumented_task(
-    name="sentry.tasks.autofix.generate_summary_and_run_automation",
-    namespace=ingest_errors_tasks,
-    processing_deadline_duration=35,
-    retry=Retry(times=1),
-)
-def generate_summary_and_run_automation(group_id: int, **kwargs) -> None:
-    from sentry.seer.autofix.issue_summary import get_issue_summary
-
-    trigger_path = kwargs.get("trigger_path", "unknown")
-    sentry_sdk.set_tag("trigger_path", trigger_path)
-    sentry_sdk.set_attribute("trigger_path", trigger_path)
-
-    group = _get_group_or_log(group_id, "generate_summary_and_run_automation")
-    if group is None:
-        return
-    organization = group.project.organization
-
-    task_state = current_task()
-    if task_state is None or task_state.attempt == 0:
-        metrics.incr("sentry.tasks.autofix.generate_summary_and_run_automation", sample_rate=1.0)
-        analytics.record(
-            AiAutofixAutomationEvent(
-                organization_id=organization.id,
-                project_id=group.project_id,
-                group_id=group.id,
-                task_name="generate_summary_and_run_automation",
-                issue_event_count=group.times_seen,
-                fixability_score=group.seer_fixability_score,
-            )
+def _generate_issue_summary_and_score(group: Group, source: SeerAutomationSource) -> bool:
+    _, status_code = get_issue_summary(group=group, source=source)
+    if status_code == 503:
+        raise UnableToAcquireLock(
+            f"Timed out waiting for issue summary generation for group {group.id}"
         )
+    if status_code != 200:
+        return False
 
-    get_issue_summary(group=group, source=SeerAutomationSource.POST_PROCESS)
+    get_and_update_group_fixability_score(group)
+    return True
 
 
 @instrumented_task(
@@ -96,19 +81,15 @@ def generate_summary_and_run_automation(group_id: int, **kwargs) -> None:
     processing_deadline_duration=35,
     retry=Retry(times=3, delay=3, on=(Exception,)),
 )
-def generate_issue_summary_only(group_id: int) -> None:
-    """
-    Generate issue summary WITHOUT triggering automation.
-    Used for the triage signals flow when a summary doesn't exist yet.
-    """
-    from sentry.seer.autofix.issue_summary import (
-        get_and_update_group_fixability_score,
-        get_issue_summary,
-    )
-
+def generate_issue_summary_only(
+    group_id: int,
+    source: SeerAutomationSource | str = SeerAutomationSource.POST_PROCESS,
+) -> None:
+    """Generate an issue summary and fixability score without running automation."""
     group = _get_group_or_log(group_id, "generate_issue_summary_only")
     if group is None:
         return
+    source = SeerAutomationSource(source)
     organization = group.project.organization
 
     task_state = current_task()
@@ -125,52 +106,45 @@ def generate_issue_summary_only(group_id: int) -> None:
             )
         )
 
-    # Generate and cache the summary
-    get_issue_summary(
-        group=group, source=SeerAutomationSource.POST_PROCESS, should_run_automation=False
-    )
-
-    get_and_update_group_fixability_score(group, force_generate=True)
+    _generate_issue_summary_and_score(group, source)
 
 
 @instrumented_task(
-    name="sentry.tasks.autofix.run_automation_only_task",
+    name="sentry.tasks.autofix.run_issue_automation",
     namespace=ingest_errors_tasks,
     processing_deadline_duration=35,
-    retry=Retry(times=1),
+    retry=Retry(times=5, delay=5, on=(Exception,)),
 )
-def run_automation_only_task(group_id: int) -> None:
-    """
-    Run automation directly for a group (assumes summary and fixability already exist).
-    Used for the triage signals flow when a summary already exists.
-    """
-    from django.contrib.auth.models import AnonymousUser
+def run_issue_automation(group_id: int, trigger_path: str = "unknown") -> None:
+    """Generate the inputs required by automation, then run it."""
+    sentry_sdk.set_tag("trigger_path", trigger_path)
+    sentry_sdk.set_attribute("trigger_path", trigger_path)
 
-    from sentry.seer.autofix.issue_summary import run_automation
-
-    group = _get_group_or_log(group_id, "run_automation_only_task")
+    group = _get_group_or_log(group_id, "run_issue_automation")
     if group is None:
         return
     organization = group.project.organization
 
     task_state = current_task()
     if task_state is None or task_state.attempt == 0:
-        metrics.incr("sentry.tasks.autofix.run_automation_only_task", sample_rate=1.0)
+        metrics.incr("sentry.tasks.autofix.run_issue_automation", sample_rate=1.0)
         analytics.record(
             AiAutofixAutomationEvent(
                 organization_id=organization.id,
                 project_id=group.project_id,
                 group_id=group.id,
-                task_name="run_automation_only",
+                task_name="run_issue_automation",
                 issue_event_count=group.times_seen,
                 fixability_score=group.seer_fixability_score,
             )
         )
 
-    event = group.get_latest_event()
+    if not _generate_issue_summary_and_score(group, SeerAutomationSource.POST_PROCESS):
+        return
 
+    event = group.get_latest_event()
     if not event:
-        logger.warning("run_automation_only_task.no_event_found", extra={"group_id": group_id})
+        logger.warning("run_issue_automation.no_event_found", extra={"group_id": group_id})
         return
 
     # Track issue age when running automation
@@ -180,9 +154,17 @@ def run_automation_only_task(group_id: int) -> None:
         "seer.automation.issue_age_since_first_seen", issue_age_days, unit="day", sample_rate=1.0
     )
 
-    run_automation(
-        group=group, user=AnonymousUser(), event=event, source=SeerAutomationSource.POST_PROCESS
-    )
+    try:
+        run_automation(
+            group=group,
+            user=AnonymousUser(),
+            event=event,
+            source=SeerAutomationSource.POST_PROCESS,
+        )
+    except Exception:
+        logger.exception(
+            "Error auto-triggering autofix from issue summary", extra={"group_id": group.id}
+        )
 
 
 @instrumented_task(

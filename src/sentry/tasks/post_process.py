@@ -1638,10 +1638,7 @@ def kick_off_seer_automation(job: PostProcessJob) -> None:
     )
     from sentry.seer.autofix.trigger import get_default_seer_automation_skip_reason
     from sentry.seer.autofix.utils import is_seer_seat_based_tier_enabled
-    from sentry.tasks.seer.autofix import (
-        generate_issue_summary_only,
-        generate_summary_and_run_automation,
-    )
+    from sentry.tasks.seer.autofix import generate_issue_summary_only, run_issue_automation
 
     event = job["event"]
     group = event.group
@@ -1663,12 +1660,12 @@ def kick_off_seer_automation(job: PostProcessJob) -> None:
                 generate_issue_summary_only.delay(group.id)
         return
 
-    skip_reason = get_default_seer_automation_skip_reason(group, locks)
+    skip_reason = get_default_seer_automation_skip_reason(group)
     if skip_reason is not None:
         metrics.incr("seer.automation.filtered", tags={"reason": skip_reason, "tier": "default"})
         return
 
-    generate_summary_and_run_automation.delay(group.id, trigger_path="old_seer_automation")
+    run_issue_automation.delay(group.id, trigger_path="old_seer_automation")
 
 
 def kick_off_lightweight_rca_cluster(job: PostProcessJob) -> None:

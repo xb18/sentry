@@ -3053,9 +3053,9 @@ class PipelineKillswitchTestMixin(BasePostProcessGroupMixin):
 
 
 class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
-    def test_kick_off_seer_automation_with_features(self, mock_generate_summary_and_run_automation):
+    def test_kick_off_seer_automation_with_features(self, mock_run_issue_automation):
         self.project.update_option("sentry:seer_scanner_automation", True)
         event = self.create_event(
             data={"message": "testing"},
@@ -3069,13 +3069,13 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_called_once_with(
+        mock_run_issue_automation.assert_called_once_with(
             event.group.id, trigger_path="old_seer_automation"
         )
 
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     def test_kick_off_seer_automation_without_org_feature(
-        self, mock_generate_summary_and_run_automation
+        self, mock_run_issue_automation
     ):
         self.project.update_option("sentry:seer_scanner_automation", True)
         event = self.create_event(
@@ -3089,12 +3089,12 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
 
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
     def test_kick_off_seer_automation_without_scanner_on(
-        self, mock_generate_summary_and_run_automation
+        self, mock_run_issue_automation
     ):
         self.project.update_option("sentry:seer_scanner_automation", True)
         event = self.create_event(
@@ -3110,12 +3110,12 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
 
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
-    def test_kick_off_seer_automation_skips_existing_fixability_score(
-        self, mock_generate_summary_and_run_automation
+    def test_kick_off_seer_automation_runs_with_existing_fixability_score(
+        self, mock_run_issue_automation
     ):
         self.project.update_option("sentry:seer_scanner_automation", True)
         event = self.create_event(
@@ -3135,12 +3135,14 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_called_once_with(
+            event.group.id, trigger_path="old_seer_automation"
+        )
 
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
     def test_kick_off_seer_automation_skips_existing_issue(
-        self, mock_generate_summary_and_run_automation
+        self, mock_run_issue_automation
     ):
         self.project.update_option("sentry:seer_scanner_automation", True)
         event = self.create_event(
@@ -3159,12 +3161,12 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
 
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
-    def test_kick_off_seer_automation_skips_with_existing_fixability_score(
-        self, mock_generate_summary_and_run_automation
+    def test_kick_off_seer_automation_runs_without_cached_summary(
+        self, mock_run_issue_automation
     ):
         from sentry.seer.autofix.issue_summary import get_issue_summary_cache_key
 
@@ -3190,15 +3192,17 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_called_once_with(
+            event.group.id, trigger_path="old_seer_automation"
+        )
 
     @patch("sentry.seer.autofix.utils.is_seer_scanner_rate_limited")
     @patch("sentry.quotas.backend.check_seer_quota")
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
     def test_rate_limit_only_checked_after_all_other_checks_pass(
         self,
-        mock_generate_summary_and_run_automation,
+        mock_run_issue_automation,
         mock_has_budget,
         mock_is_rate_limited,
     ):
@@ -3220,12 +3224,12 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
         mock_is_rate_limited.assert_called_once_with(event.project, event.group.organization)
-        mock_generate_summary_and_run_automation.assert_called_once_with(
+        mock_run_issue_automation.assert_called_once_with(
             event.group.id, trigger_path="old_seer_automation"
         )
 
         mock_is_rate_limited.reset_mock()
-        mock_generate_summary_and_run_automation.reset_mock()
+        mock_run_issue_automation.reset_mock()
 
         # Test 2: When budget check fails, rate limit should NOT be checked
         mock_has_budget.return_value = False
@@ -3242,10 +3246,10 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event2,
         )
         mock_is_rate_limited.assert_not_called()
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
 
         mock_is_rate_limited.reset_mock()
-        mock_generate_summary_and_run_automation.reset_mock()
+        mock_run_issue_automation.reset_mock()
         mock_has_budget.return_value = True  # Reset to success
 
         # Test 4: When project option is disabled, rate limit should NOT be checked
@@ -3263,14 +3267,14 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event3,
         )
         mock_is_rate_limited.assert_not_called()
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
 
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
-    def test_kick_off_seer_automation_skips_when_lock_held(
-        self, mock_generate_summary_and_run_automation
+    def test_kick_off_seer_automation_enqueues_when_summary_lock_held(
+        self, mock_run_issue_automation
     ):
-        """Test that seer automation is skipped when another task is already processing the same issue"""
+        """The automation task waits for summary generation instead of being dropped."""
         from sentry.seer.autofix.issue_summary import get_issue_summary_lock_key
         from sentry.tasks.post_process import locks
 
@@ -3293,31 +3297,14 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
                 event=event,
             )
 
-        # Verify that seer automation was NOT started due to the lock
-        mock_generate_summary_and_run_automation.assert_not_called()
-
-        # Test that it works normally when lock is not held
-        event2 = self.create_event(
-            data={"message": "testing 2"},
-            project_id=self.project.id,
+        mock_run_issue_automation.assert_called_once_with(
+            event.group.id, trigger_path="old_seer_automation"
         )
 
-        self.call_post_process_group(
-            is_new=True,
-            is_regression=False,
-            is_new_group_environment=True,
-            event=event2,
-        )
-
-        # Now it should be called since no lock is held
-        mock_generate_summary_and_run_automation.assert_called_once_with(
-            event2.group.id, trigger_path="old_seer_automation"
-        )
-
-    @patch("sentry.tasks.seer.autofix.generate_summary_and_run_automation.delay")
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
     @with_feature("organizations:gen-ai-features")
     def test_kick_off_seer_automation_with_hide_ai_features_enabled(
-        self, mock_generate_summary_and_run_automation
+        self, mock_run_issue_automation
     ):
         """Test that seer automation is not started when organization has hideAiFeatures set to True"""
         self.project.update_option("sentry:seer_scanner_automation", True)
@@ -3335,7 +3322,7 @@ class KickOffSeerAutomationTestMixin(BasePostProcessGroupMixin):
             event=event,
         )
 
-        mock_generate_summary_and_run_automation.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
 
 
 class KickOffLightweightRCAClusterTestMixin(BasePostProcessGroupMixin):
